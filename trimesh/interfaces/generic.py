@@ -5,7 +5,7 @@ from ..io.stl import load_stl
 
 from string import Template
 from tempfile import NamedTemporaryFile
-from subprocess import check_call
+from subprocess import Popen, PIPE
 
 
 class MeshScript:
@@ -55,7 +55,21 @@ class MeshScript:
     def run(self, command):
         command_run = Template(command).substitute(self.replacement).split()
         # run the binary
-        check_call(command_run)
+        hproc = Popen(command_run, stderr=PIPE)
+
+        # if there is output in stderr, throw exception and do NOT return result, because it is probably broken
+        errmsg = ""
+        for line in iter(hproc.stderr.readline, ""):
+            if len(line.strip()) > 0:
+                errmsg += line
+        hproc.wait()
+        if errmsg != "":
+            raise Exception('{}'.format(errmsg))
+
+        # bring the binaries result back as a Trimesh object
+        with open(self.mesh_post.name, mode='rb') as file_obj:
+            mesh_result = load_stl(file_obj)
+        return mesh_result
 
         # bring the binaries result back as a Trimesh object
         with open(self.mesh_post.name, mode='rb') as file_obj:
