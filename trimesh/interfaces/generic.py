@@ -63,6 +63,8 @@ class MeshScript:
             if len(line.strip()) > 0:
                 errmsg += line
         hproc.wait()
+        errmsg = errmsg.strip()
+        errmsg = errmsg.replace("Could not initialize localization.", "")
         if errmsg != "":
             raise Exception('{}'.format(errmsg))
 
