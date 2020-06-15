@@ -1,18 +1,41 @@
+"""
+nsphere.py
+--------------
+
+Functions for fitting and minimizing nspheres:
+circles, spheres, hyperspheres, etc.
+"""
 import numpy as np
 
+from . import util
 from . import convex
 
-from .constants import log
+from .constants import log, tol
 
 try:
+    # scipy is a soft dependency
     from scipy import spatial
     from scipy.optimize import leastsq
+except BaseException as E:
+    # raise the exception when someone tries to use it
+    from . import exceptions
+    leastsq = exceptions.closure(E)
+    spatial = exceptions.ExceptionModule(E)
+
+try:
+    import psutil
+
+    def _MAX_MEMORY():
+        # if we have psutil check actual free memory when called
+        return psutil.virtual_memory().free / 2.0
 except ImportError:
-    log.warning('No scipy!')
+    def _MAX_MEMORY():
+        # use a hardcoded best guess estimate
+        return 1e9
 
 
 def minimum_nsphere(obj):
-    '''
+    """
     Compute the minimum n- sphere for a mesh or a set of points.
 
     Uses the fact that the minimum n- sphere will be centered at one of
@@ -22,14 +45,16 @@ def minimum_nsphere(obj):
 
     Parameters
     ----------
-    obj: Trimesh object OR
-         (n,d) float, set of points
+    obj : (n, d) float or trimesh.Trimesh
+      Points or mesh to find minimum bounidng nsphere
 
     Returns
     ----------
-    center: (d) float, center of n- sphere
-    radius: float, radius of n-sphere
-    '''
+    center : (d,) float
+      Center of fitted n- sphere
+    radius : float
+      Radius of fitted n-sphere
+    """
     # reduce the input points or mesh to the vertices of the convex hull
     # since we are computing the furthest site voronoi diagram this reduces
     # the input complexity substantially and returns the same value
@@ -38,9 +63,9 @@ def minimum_nsphere(obj):
     # we are scaling the mesh to a unit cube
     # this used to pass qhull_options 'QbB' to Voronoi however this had a bug somewhere
     # to avoid this we scale to a unit cube ourselves inside this function
-    points_min = points.min(axis=0)
-    points_scale = points.ptp(axis=0).max()
-    points = (points - points_min) / points_scale
+    points_origin = points.min(axis=0)
+    points_scale = points.ptp(axis=0).min()
+    points = (points - points_origin) / points_scale
 
     # if all of the points are on an n-sphere already the voronoi
     # method will fail so we check a least squares fit before
@@ -48,7 +73,7 @@ def minimum_nsphere(obj):
     fit_C, fit_R, fit_E = fit_nsphere(points)
     # return fit radius and center to global scale
     fit_R = (((points - fit_C)**2).sum(axis=1).max() ** .5) * points_scale
-    fit_C = (fit_C * points_scale) + points_min
+    fit_C = (fit_C * points_scale) + points_origin
 
     if fit_E < 1e-6:
         log.debug('Points were on an n-sphere, returning fit')
@@ -61,56 +86,106 @@ def minimum_nsphere(obj):
     voronoi = spatial.Voronoi(points, furthest_site=True)
 
     # find the maximum radius^2 point for each of the voronoi vertices
-    # this is worst case quite expensive, but we have used quick convex
-    # hull methods to reduce n for this operation
-    # we are doing comparisons on the radius^2 value so as to only do a sqrt
-    # once
-    r2 = np.array([((points - v)**2).sum(axis=1).max()
-                   for v in voronoi.vertices])
-    # we want the smallest sphere, so we take the min of the radii options
-    r2_idx = r2.argmin()
-    center_v = voronoi.vertices[r2_idx]
+    # this is worst case quite expensive but we have taken
+    # convex hull to reduce n for this operation
+    # we are doing comparisons on the radius squared then rooting once
+    try:
+        # cdist is massivly faster than looping or tiling methods
+        # although it does create a very large intermediate array
+        # first, get an order of magnitude memory size estimate
+        # a float64 would be 8 bytes per entry plus overhead
+        memory_estimate = len(voronoi.vertices) * len(points) * 9
+        if memory_estimate > _MAX_MEMORY():
+            raise MemoryError
+        radii_2 = spatial.distance.cdist(
+            voronoi.vertices, points,
+            metric='sqeuclidean').max(axis=1)
+    except MemoryError:
+        # log the MemoryError
+        log.warning('MemoryError: falling back to slower check!')
+        # fall back to a potentially very slow list comprehension
+        radii_2 = np.array([((points - v) ** 2).sum(axis=1).max()
+                            for v in voronoi.vertices])
+
+    # we want the smallest sphere so take the min of the radii
+    radii_idx = radii_2.argmin()
 
     # return voronoi radius and center to global scale
-    radius_v = np.sqrt(r2[r2_idx]) * points_scale
-    center_v = (center_v * points_scale) + points_min
+    radius_v = np.sqrt(radii_2[radii_idx]) * points_scale
+    center_v = (voronoi.vertices[radii_idx] *
+                points_scale) + points_origin
 
     if radius_v > fit_R:
         return fit_C, fit_R
+
     return center_v, radius_v
 
 
 def fit_nsphere(points, prior=None):
-    '''
+    """
     Fit an n-sphere to a set of points using least squares.
 
     Parameters
-    ---------
-    points: (n,d) set of points
-    prior:  (d,) float, best guess for center of nsphere
+    ------------
+    points : (n, d) float
+      Points in space
+    prior : (d,) float
+      Best guess for center of nsphere
 
     Returns
     ---------
-    center: (d), location of center
-    radius: float, mean radius across circle
-    error:  float, peak to peak value of deviation from mean radius
-    '''
+    center : (d,) float
+      Location of center
+    radius : float
+      Mean radius across circle
+    error : float
+      Peak to peak value of deviation from mean radius
+    """
+    # make sure points are numpy array
+    points = np.asanyarray(points, dtype=np.float64)
+    # create ones so we can dot instead of using slower sum
+    ones = np.ones(points.shape[1])
 
     def residuals(center):
-        radii_sq = ((points - center)**2).sum(axis=1)
-        residuals = radii_sq - radii_sq.mean()
-        return residuals
+        # do the axis sum with a dot
+        # this gets called a LOT so worth optimizing
+        radii_sq = np.dot((points - center) ** 2, ones)
+        # residuals are difference between mean
+        # use our sum mean vs .mean() as it is slightly faster
+        return radii_sq - (radii_sq.sum() / len(radii_sq))
 
     if prior is None:
-        center_guess = np.mean(points, axis=0)
+        guess = points.mean(axis=0)
     else:
-        center_guess = prior
+        guess = np.asanyarray(prior)
 
-    center_result, return_code = leastsq(residuals, center_guess, gtol=1e-8)
+    center_result, return_code = leastsq(residuals,
+                                         guess,
+                                         xtol=1e-8)
+
     if not (return_code in [1, 2, 3, 4]):
         raise ValueError('Least square fit failed!')
 
-    radii = np.linalg.norm(points - center_result, axis=1)
+    radii = util.row_norm(points - center_result)
     radius = radii.mean()
     error = radii.ptp()
     return center_result, radius, error
+
+
+def is_nsphere(points):
+    """
+    Check if a list of points is an nsphere.
+
+    Parameters
+    -----------
+    points : (n, dimension) float
+      Points in space
+
+    Returns
+    -----------
+    check : bool
+      True if input points are on an nsphere
+    """
+    center, radius, error = fit_nsphere(points)
+    check = error < tol.merge
+    return check

@@ -1,18 +1,25 @@
 import numpy as np
 
-from collections import deque
+import copy
+import collections
 
 from . import arc
 from . import entities
 
+from .. import util
+
 from ..nsphere import fit_nsphere
-from ..util import unitize, diagonal_dot
+
 from ..constants import log
 from ..constants import tol_path as tol
 
 
-def fit_circle_check(points, scale, prior=None, final=False, verbose=False):
-    '''
+def fit_circle_check(points,
+                     scale,
+                     prior=None,
+                     final=False,
+                     verbose=False):
+    """
     Fit a circle, and reject the fit if:
     * the radius is larger than tol.radius_min*scale or tol.radius_max*scale
     * any segment spans more than tol.seg_angle
@@ -22,23 +29,28 @@ def fit_circle_check(points, scale, prior=None, final=False, verbose=False):
 
     Parameters
     ---------
-    points:  (n, d) set of points which represent a path
-    prior:   (center, radius) tuple for best guess, or None if unknown
-    scale:   float, what is the overall scale of the set of points
-    verbose: boolean, if True output log.debug messages for the reasons
-             for fit rejection. Potentially generates hundreds of thousands of
-             messages so only suggested in manual debugging.
+    points :  (n, d)
+      List of points which represent a path
+    prior :  (center, radius) tuple
+      Best guess or None if unknown
+    scale : float
+      What is the overall scale of the set of points
+    verbose : bool
+     Output log.debug messages for the reasons
+     for fit rejection only suggested for manual debugging
 
     Returns
-    ---------
+    -----------
     if fit is acceptable:
         (center, radius) tuple
     else:
         None
-    '''
+    """
     # an arc needs at least three points
     if len(points) < 3:
         return None
+    # make sure our points are a numpy array
+    points = np.asanyarray(points, dtype=np.float64)
 
     # do a least squares fit on the points
     C, R, r_deviation = fit_nsphere(points, prior=prior)
@@ -57,12 +69,11 @@ def fit_circle_check(points, scale, prior=None, final=False, verbose=False):
         return None
 
     vectors = np.diff(points, axis=0)
-    segment = np.linalg.norm(vectors, axis=1)
+    segment = util.row_norm(vectors)
 
     # approximate angle in radians, segments are linear length
     # not arc length but this is close and avoids a cosine
     angle = segment / R
-
     if (angle > tol.seg_angle).any():
         if verbose:
             log.debug('circle fit error: angle %s', str(angle))
@@ -83,24 +94,42 @@ def fit_circle_check(points, scale, prior=None, final=False, verbose=False):
     # check to make sure the line segments on the ends are actually
     # tangent with the candidate circle fit
     mid_pt = points[[0, -2]] + (vectors[[0, -1]] * .5)
-    radial = unitize(mid_pt - C)
-    ends = unitize(vectors[[0, -1]])
-    tangent = np.abs(np.arccos(diagonal_dot(radial, ends)))
+    radial = util.unitize(mid_pt - C)
+    ends = util.unitize(vectors[[0, -1]])
+    tangent = np.abs(np.arccos(util.diagonal_dot(radial, ends)))
     tangent = np.abs(tangent - np.pi / 2).max()
+
     if tangent > tol.tangent:
         if verbose:
             log.debug('circle fit error: tangent %f',
                       np.degrees(tangent))
         return None
 
-    return (C, R)
+    result = {'center': C,
+              'radius': R}
+
+    return result
 
 
 def is_circle(points, scale, verbose=False):
-    '''
+    """
     Given a set of points, quickly determine if they represent
     a circle or not.
-    '''
+
+    Parameters
+    -------------
+    points : (n,2 ) float
+      Points in space
+    scale : float
+      Scale of overall drawing
+    verbose : bool
+      Print all fit messages or not
+
+    Returns
+    -------------
+    control: (3,2) float, points in space, OR
+              None, if not a circle
+    """
 
     # make sure input is a numpy array
     points = np.asanyarray(points)
@@ -124,153 +153,42 @@ def is_circle(points, scale, verbose=False):
         return None
 
     # return the circle as three control points
-    control = arc.angles_to_threepoint([0, np.pi * .5], *CR)
+    control = arc.to_threepoint(**CR)
     return control
 
 
-def arc_march(points, scale):
-    '''
-    Split a path into line and arc segments, using least squares fit.
-
-    Parameters
-    ---------
-    points: (n,d) points
-
-    Returns:
-    arcs:  (b) sequence of points indices that could be replaced with an arc
-    '''
-
-    def finalize_arc(points_id):
-        # do final checks on the points contained in current and append them
-        # to the list of arcs if they pass
-        points_id = np.array(points_id)
-
-        if fit_circle_check(points[points_id], scale=scale, final=True) is None:
-            return
-
-        points_id = points_id[[0, int(len(points_id) / 2.0), -1]]
-
-        try:
-            center_info = arc.arc_center(points[points_id])
-            C, R, N, A = (center_info['center'],
-                          center_info['radius'],
-                          center_info['normal'],
-                          center_info['span'])
-        except ValueError:
-            log.warning('Skipping candidate arc!', exc_info=True)
-            return
-
-        span = scale * (A / R)
-        if span > 1.5:
-            arcs.append(points_id)
-        else:
-            log.debug('Arc failed span test: %f', span)
-
-    points = np.asanyarray(points)
-    closed = np.linalg.norm(points[0] - points[-1]) < tol.merge
-    count = len(points)
-    scale = float(scale)
-    # if scale is None:
-    #    scale = np.ptp(points, axis=0).max()
-
-    arcs = deque()
-    current = deque()
-    prior = None
-
-    # how many times to go through points
-    # if the points are closed go through them up to twice
-    attempts = count + count * int(closed)
-
-    for index in range(attempts):
-        # have we already traversed these points
-        looped = index >= count
-        # make sure we stay in range
-        i = index % count
-
-        # if we looped over, it means that these points are closed
-        # and if they are closed it means points[0] == points[-1]
-        # thus, once we go over them the second time we want to skip index
-        # zero to avoid processing a duplicate point.
-        if looped and i == 0:
-            continue
-
-        # add an index to the current set of candidates
-        current.append(i)
-        # if the current number of candidates is less than three they can't be
-        # an arc
-        if (len(current) < 3):
-            continue
-
-        # fit a circle to the points, and reject the fit if tolerances aren't met
-        # if the fit is rejected, fit_circle_check will return None
-        checked = fit_circle_check(points[current],
-                                   prior=prior,
-                                   scale=scale)
-        arc_ok = checked is not None
-
-        # since we are going over the points twice, on the second pass we only
-        # want to go until an arc fit fails
-        ending = looped and (not arc_ok)
-        ending = ending or (index >= attempts - 1)
-
-        if ending and prior is not None:
-            # we could be stopping for a bad fit,
-            # or we could have just ran out of indexes.
-            # if its a bad fit, remove the last point added.
-            if not arc_ok:
-                current.pop()
-            # if we are stopping and have gotten an acceptable fit add the arc
-            finalize_arc(current)
-        elif arc_ok:
-            # if we aren't ending and the fit looks good
-            # just update the prior with the fit
-            prior = checked[0]
-        elif prior is None:
-            # we haven't seen an acceptable fit
-            # so remove an index from the left
-            current.popleft()
-        else:
-            # the arc isn't ok, and we have a fit so remove
-            # the latest point then add the arc
-            current.pop()
-            finalize_arc(current)
-            # reset the candidates
-            current = deque([i - 1, i])
-            prior = None
-
-        if ending:
-            break
-
-    if looped and len(arcs) > 0 and arcs[0][0] == 0:
-        arcs.popleft()
-
-    arcs = np.array(arcs)
-    return arcs
-
-
-def merge_colinear(points, scale=None):
-    '''
+def merge_colinear(points, scale):
+    """
     Given a set of points representing a path in space,
     merge points which are colinear.
 
     Parameters
     ----------
-    points: (n, d) set of points (where d is dimension)
-    scale:  float, scale of drawing
+    points : (n, dimension) float
+      Points in space
+    scale : float
+      Scale of drawing for precision
 
     Returns
     ----------
-    merged: (j, d) set of points with colinear and duplicate
-             points merged, where (j < n)
-    '''
-    points = np.array(points)
-    if scale is None:
-        scale = np.ptp(points, axis=0).max()
+    merged : (j, d) float
+      Points with colinear and duplicate
+      points merged, where (j < n)
+    """
+    points = np.asanyarray(points, dtype=np.float64)
+    scale = float(scale)
+
+    if len(points.shape) != 2 or points.shape[1] != 2:
+        raise ValueError('only for 2D points!')
+
+    # if there's less than 3 points nothing to merge
+    if len(points) < 3:
+        return points.copy()
 
     # the vector from one point to the next
     direction = points[1:] - points[:-1]
     # the length of the direction vector
-    direction_norm = np.linalg.norm(direction, axis=1)
+    direction_norm = util.row_norm(direction)
     # make sure points don't have zero length
     direction_ok = direction_norm > tol.merge
 
@@ -283,12 +201,15 @@ def merge_colinear(points, scale=None):
     # if we have points A B C D
     # and direction vectors A-B, B-C, etc
     # these will be perpendicular to the vectors A-C, B-D, etc
-    perpendicular = (points[2:] - points[:-2]).T[::-1].T
-    perpendicular /= np.linalg.norm(perpendicular, axis=1).reshape((-1, 1))
+    perp = (points[2:] - points[:-2]).T[::-1].T
+    perp_norm = util.row_norm(perp)
+    perp_nonzero = perp_norm > tol.merge
+    perp[perp_nonzero] /= perp_norm[perp_nonzero].reshape((-1, 1))
 
     # find the projection of each direction vector
     # onto the perpendicular vector
-    projection = np.abs(diagonal_dot(perpendicular, direction[:-1]))
+    projection = np.abs(util.diagonal_dot(perp,
+                                          direction[:-1]))
 
     projection_ratio = np.max((projection / direction_norm[1:],
                                projection / direction_norm[:-1]), axis=0)
@@ -302,6 +223,25 @@ def merge_colinear(points, scale=None):
 
 
 def resample_spline(points, smooth=.001, count=None, degree=3):
+    """
+    Resample a path in space, smoothing along a b-spline.
+
+    Parameters
+    -----------
+    points : (n, dimension) float
+      Points in space
+    smooth : float
+      Smoothing distance
+    count :  int or None
+      Number of samples desired in output
+    degree : int
+      Degree of spline polynomial
+
+    Returns
+    ---------
+    resampled : (count, dimension) float
+      Points in space
+    """
     from scipy.interpolate import splprep, splev
     if count is None:
         count = len(points)
@@ -320,12 +260,34 @@ def resample_spline(points, smooth=.001, count=None, degree=3):
     return resampled
 
 
-def points_to_spline_entity(points, smooth=.0005, count=None):
-    from scipy.interpolate import splprep
+def points_to_spline_entity(points, smooth=None, count=None):
+    """
+    Create a spline entity from a curve in space
 
+    Parameters
+    -----------
+    points : (n, dimension) float
+      Points in space
+    smooth : float
+      Smoothing distance
+    count :  int or None
+      Number of samples desired in result
+
+    Returns
+    ---------
+    entity : entities.BSpline
+      Entity object with points indexed at zero
+    control : (m, dimension) float
+      New vertices for entity
+    """
+
+    from scipy.interpolate import splprep
     if count is None:
         count = len(points)
-    points = np.asanyarray(points)
+    if smooth is None:
+        smooth = 0.002
+
+    points = np.asanyarray(points, dtype=np.float64)
     closed = np.linalg.norm(points[0] - points[-1]) < tol.merge
 
     knots, control, degree = splprep(points.T, s=smooth)[0]
@@ -344,161 +306,131 @@ def points_to_spline_entity(points, smooth=.0005, count=None):
     return entity, control
 
 
-def three_point(indices):
-    '''
-    Given a long list of ordered indices, 
-    return the first, middle and last.
-
-    Parameters
-    -----------
-    indices: (n,) array
-
-    Returns
-    ----------
-    three: (3,) array
-    '''
-    three = [indices[0],
-             indices[int(len(indices) / 2)],
-             indices[-1]]
-    return np.array(three)
-
-
-def polygon_to_cleaned(polygon, scale):
-    '''
-    Return the exterior of a polygon with colinear segments merged
-
-    Parameters
-    ----------
-    polygon: shapely.geometry.Polygon object
-    scale:   float, scale of polygon
-
-    Returns
-    ---------
-    points: (n,2) float, points that make up exterior of polygon
-    '''
-    buffered = polygon.buffer(0.0)
-    points = merge_colinear(points=buffered.exterior.coords, scale=scale)
-    return points
-
-
-def simplify_path(drawing):
-    '''
-    Merge colinear segments and fit circles and arcs.
-
-    Arc march produces garbage occasionally, the output of 
-    this function needs to be looked at and checked manually.
-
-    Parameters
-    -----------
-    drawing: Path2D object
-
-    Returns
-    -----------
-    simplified: Path2D object
-    '''
-
-    if any([i.__class__.__name__ != 'Line' for i in drawing.entities]):
-        log.debug('Path contains non- linear entities, skipping')
-        return
-
-    vertices_new = deque()
-    entities_new = deque()
-
-    for path_index in range(len(drawing.paths)):
-        points = polygon_to_cleaned(drawing.polygons_closed[path_index],
-                                    scale=drawing.scale)
-        circle = is_circle(points, scale=drawing.scale)
-
-        if circle is not None:
-            entities_new.append(entities.Arc(points=np.arange(3) + len(vertices_new),
-                                             closed=True))
-            vertices_new.extend(circle)
-        else:
-            arc_idx = arc_march(points, scale=drawing.scale)
-            if len(arc_idx) > 0:
-                for arc in arc_idx:
-                    entities_new.append(entities.Arc(points=three_point(arc) + len(vertices_new),
-                                                     closed=False))
-                line_idx = infill_lines(
-                    arc_idx, len(points)) + len(vertices_new)
-            else:
-                line_idx = pair_space(0, len(points) - 1) + len(vertices_new)
-                line_idx = [np.mod(np.arange(len(points) + 1),
-                                   len(points)) + len(vertices_new)]
-
-            for line in line_idx:
-                entities_new.append(entities.Line(points=line))
-            vertices_new.extend(points)
-
-    simplified = type(drawing)(entities=entities_new,
-                               vertices=vertices_new)
-
-    return simplified
-
-
-def simplify_basic(drawing):
-    '''
+def simplify_basic(drawing, process=False, **kwargs):
+    """
     Merge colinear segments and fit circles.
 
-    No intermediate arc substitution.
-
     Parameters
     -----------
-    drawing: Path2D object
+    drawing : Path2D
+      Source geometry, will not be modified
 
     Returns
     -----------
-    simplified: Path2D with circles. 
-    '''
+    simplified : Path2D
+      Original path but with some closed line-loops converted to circles
+    """
 
-    if any([i.__class__.__name__ != 'Line' for i in drawing.entities]):
+    if any(i.__class__.__name__ != 'Line'
+           for i in drawing.entities):
         log.debug('Path contains non- linear entities, skipping')
-        return
+        return drawing
 
-    vertices_new = deque()
-    entities_new = deque()
+    # we are going to do a bookkeeping to avoid having
+    # to recompute literally everything when simplification is ran
+    cache = copy.deepcopy(drawing._cache)
 
-    for path_index in range(len(drawing.paths)):
-        points = polygon_to_cleaned(drawing.polygons_closed[path_index],
-                                    scale=drawing.scale)
-        circle = is_circle(points, scale=drawing.scale)
+    # store new values
+    vertices_new = collections.deque()
+    entities_new = collections.deque()
 
+    # avoid thrashing cache in loop
+    scale = drawing.scale
+
+    # loop through (n, 2) closed paths
+    for discrete in drawing.discrete:
+        # check to see if the closed entity is a circle
+        circle = is_circle(discrete,
+                           scale=scale)
         if circle is not None:
-            entities_new.append(entities.Arc(points=np.arange(3) + len(vertices_new),
+            # the points are circular enough for our high standards
+            # so replace them with a closed Arc entity
+            entities_new.append(entities.Arc(points=np.arange(3) +
+                                             len(vertices_new),
                                              closed=True))
             vertices_new.extend(circle)
         else:
-            line = np.arange(len(points)) + len(vertices_new)
-            entities_new.append(entities.Line(points=line))
+            # not a circle, so clean up colinear segments
+            # then save it as a single line entity
+            points = merge_colinear(discrete, scale=scale)
+            # references for new vertices
+            indexes = np.arange(len(points)) + len(vertices_new)
+            # discrete curves are always closed
+            indexes[-1] = indexes[0]
+            # append new vertices and entity
+            entities_new.append(entities.Line(points=indexes))
             vertices_new.extend(points)
 
-    simplified = type(drawing)(entities=entities_new,
-                               vertices=vertices_new)
+    # create the new drawing object
+    simplified = type(drawing)(
+        entities=entities_new,
+        vertices=vertices_new,
+        metadata=copy.deepcopy(drawing.metadata),
+        process=process)
+    # we have changed every path to a single closed entity
+    # either a closed arc, or a closed line
+    # so all closed paths are now represented by a single entity
+    cache.cache.update({
+        'paths': np.arange(len(entities_new)).reshape((-1, 1)),
+        'path_valid': np.ones(len(entities_new), dtype=np.bool),
+        'dangling': np.array([])})
+
+    # force recompute of exact bounds
+    if 'bounds' in cache.cache:
+        cache.cache.pop('bounds')
+
+    simplified._cache = cache
+    # set the cache ID so it won't dump when a value is requested
+    simplified._cache.id_set()
 
     return simplified
 
 
-def pair_space(start, end):
-    if start == end:
-        return []
-    idx = np.arange(start, end + 1)
-    idx = np.column_stack((idx, idx)).reshape(-1)[1:-1].reshape(-1, 2)
-    return idx
+def simplify_spline(path, smooth=None, verbose=False):
+    """
+    Replace discrete curves with b-spline or Arc and
+    return the result as a new Path2D object.
 
+    Parameters
+    ------------
+    path : trimesh.path.Path2D
+      Input geometry
+    smooth : float
+      Distance to smooth
 
-def infill_lines(idxs, idx_max):
-    if len(idxs) == 0:
-        return np.array([])
-    ends = np.array([i[[0, -1]] for i in idxs])
-    ends = np.roll(ends.reshape(-1), -1).reshape(-1, 2)
+    Returns
+    ------------
+    simplified : Path2D
+      Consists of Arc and BSpline entities
+    """
 
-    if np.greater(*ends[-1]):
-        ends[-1][1] += idx_max
+    new_vertices = []
+    new_entities = []
+    scale = path.scale
 
-    infill = np.diff(ends, axis=1).reshape(-1) > 0
-    aranges = ends[infill]
-    if len(aranges) == 0:
-        return np.array([])
-    result = np.vstack([pair_space(*i) for i in aranges])
-    result %= idx_max
-    return result
+    for discrete in path.discrete:
+        circle = is_circle(discrete,
+                           scale=scale,
+                           verbose=verbose)
+        if circle is not None:
+            # the points are circular enough for our high standards
+            # so replace them with a closed Arc entity
+            new_entities.append(entities.Arc(points=np.arange(3) +
+                                             len(new_vertices),
+                                             closed=True))
+            new_vertices.extend(circle)
+            continue
+
+        # entities for this path
+        entity, vertices = points_to_spline_entity(discrete, smooth=smooth)
+        # reindex returned control points
+        entity.points += len(new_vertices)
+        # save entity and vertices
+        new_vertices.extend(vertices)
+        new_entities.append(entity)
+
+    # create the Path2D object for the result
+    simplified = type(path)(entities=new_entities,
+                            vertices=new_vertices)
+
+    return simplified

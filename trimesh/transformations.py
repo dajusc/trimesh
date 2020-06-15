@@ -1,8 +1,12 @@
 # -*- coding: utf-8 -*-
 # transformations.py
 
-# Copyright (c) 2006-2015, Christoph Gohlke
-# Copyright (c) 2006-2015, The Regents of the University of California
+# Modified for inclusion in the `trimesh` library
+# https://github.com/mikedh/trimesh
+# -----------------------------------------------------------------------
+#
+# Copyright (c) 2006-2017, Christoph Gohlke
+# Copyright (c) 2006-2017, The Regents of the University of California
 # Produced at the Laboratory for Fluorescence Dynamics
 # All rights reserved.
 #
@@ -44,12 +48,12 @@ functions to decompose transformation matrices.
 :Organization:
   Laboratory for Fluorescence Dynamics, University of California, Irvine
 
-:Version: 2015.03.19
+:Version: 2017.02.17
 
 Requirements
 ------------
 * `CPython 2.7 or 3.4 <http://www.python.org>`_
-* `numpy 1.9 <http://www.numpy.org>`_
+* `numpy 1.9 <http://www.np.org>`_
 * `Transformations.c 2015.03.19 <http://www.lfd.uci.edu/~gohlke/>`_
   (recommended for speedup of some functions)
 
@@ -64,8 +68,8 @@ Documentation in HTML format can be generated with epydoc.
 
 Matrices (M) can be inverted using np.linalg.inv(M), be concatenated using
 np.dot(M0, M1), or transform homogeneous coordinate arrays (v) using
-np.dot(M, v) for shape (4, \*) column vectors, respectively
-np.dot(v, M.T) for shape (\*, 4) row vectors ("array of points").
+np.dot(M, v) for shape (4, *) column vectors, respectively
+np.dot(v, M.T) for shape (*, 4) row vectors ("array of points").
 
 This module follows the "column vectors on the right" and "row major storage"
 (C contiguous) conventions. The translation components are in the right column
@@ -76,9 +80,9 @@ with other graphics systems, e.g. with OpenGL's glMultMatrixd(). See also [16].
 Calculations are carried out with np.float64 precision.
 
 Vector, point, quaternion, and matrix function arguments are expected to be
-"array like", i.e. tuple, list, or np arrays.
+"array like", i.e. tuple, list, or numpy arrays.
 
-Return types are np arrays unless specified otherwise.
+Return types are numpy arrays unless specified otherwise.
 
 Angles are in radians unless specified otherwise.
 
@@ -105,7 +109,7 @@ Other Python packages and modules for 3D transformations and quaternions:
 * `Transforms3d <https://pypi.python.org/pypi/transforms3d>`_
    includes most code of this module.
 * `Blender.mathutils <http://www.blender.org/api/blender_python_api>`_
-* `np-dtypes <https://github.com/np/np-dtypes>`_
+* `numpy-dtypes <https://github.com/numpy/numpy-dtypes>`_
 
 References
 ----------
@@ -199,7 +203,7 @@ import math
 
 import numpy as np
 
-__version__ = '2015.03.19'
+__version__ = '2017.02.17'
 __docformat__ = 'restructuredtext en'
 __all__ = ()
 
@@ -220,15 +224,20 @@ def identity_matrix():
 
 
 def translation_matrix(direction):
-    """Return matrix to translate by direction vector.
+    """
+    Return matrix to translate by direction vector.
 
     >>> v = np.random.random(3) - 0.5
     >>> np.allclose(v, translation_matrix(v)[:3, 3])
     True
 
     """
-    M = np.identity(4)
-    M[:3, 3] = direction[:3]
+    # are we 2D or 3D
+    dim = len(direction)
+    # start with identity matrix
+    M = np.identity(dim + 1)
+    # apply the offset
+    M[:dim, dim] = direction[:dim]
     return M
 
 
@@ -300,8 +309,26 @@ def reflection_from_matrix(matrix):
 
 
 def rotation_matrix(angle, direction, point=None):
-    """Return matrix to rotate about axis defined by point and direction.
+    """
+    Return matrix to rotate about axis defined by point and
+    direction.
 
+    Parameters
+    -------------
+    angle     : float, or sympy.Symbol
+      Angle, in radians or symbolic angle
+    direction : (3,) float
+      Unit vector along rotation axis
+    point     : (3, ) float, or None
+      Origin point of rotation axis
+
+    Returns
+    -------------
+    matrix : (4, 4) float, or (4, 4) sympy.Matrix
+      Homogeneous transformation matrix
+
+    Examples
+    -------------
     >>> R = rotation_matrix(math.pi/2, [0, 0, 1], [1, 0, 0])
     >>> np.allclose(np.dot(R, [0, 0, 0, 1]), [1, -1, 0, 1])
     True
@@ -319,27 +346,40 @@ def rotation_matrix(angle, direction, point=None):
     >>> I = np.identity(4, np.float64)
     >>> np.allclose(I, rotation_matrix(math.pi*2, direc))
     True
-    >>> np.allclose(2, np.trace(rotation_matrix(math.pi/2,
-    ...                                               direc, point)))
+    >>> np.allclose(2, np.trace(rotation_matrix(math.pi/2,direc,point)))
     True
 
     """
-    sina = math.sin(angle)
-    cosa = math.cos(angle)
+    if type(angle).__name__ == 'Symbol':
+        # special case sympy symbolic angles
+        import sympy as sp
+        symbolic = True
+        sina = sp.sin(angle)
+        cosa = sp.cos(angle)
+    else:
+        symbolic = False
+        sina = math.sin(angle)
+        cosa = math.cos(angle)
+
     direction = unit_vector(direction[:3])
     # rotation matrix around unit vector
-    R = np.diag([cosa, cosa, cosa])
-    R += np.outer(direction, direction) * (1.0 - cosa)
-    direction *= sina
-    R += np.array([[0.0, -direction[2], direction[1]],
-                   [direction[2], 0.0, -direction[0]],
-                   [-direction[1], direction[0], 0.0]])
-    M = np.identity(4)
-    M[:3, :3] = R
+    M = np.diag([cosa, cosa, cosa, 1.0])
+    M[:3, :3] += np.outer(direction, direction) * (1.0 - cosa)
+
+    direction = direction * sina
+    M[:3, :3] += np.array([[0.0, -direction[2], direction[1]],
+                           [direction[2], 0.0, -direction[0]],
+                           [-direction[1], direction[0], 0.0]])
+
+    # if point is specified, rotation is not around origin
     if point is not None:
-        # rotation not around origin
         point = np.array(point[:3], dtype=np.float64, copy=False)
-        M[:3, 3] = point - np.dot(R, point)
+        M[:3, 3] = point - np.dot(M[:3, :3], point)
+
+    # return symbolic angles as sympy Matrix objects
+    if symbolic:
+        return sp.Matrix(M)
+
     return M
 
 
@@ -617,17 +657,21 @@ def clip_matrix(left, right, bottom, top, near, far, perspective=False):
     >>> frustum[3] += frustum[2]
     >>> frustum[5] += frustum[4]
     >>> M = clip_matrix(perspective=False, *frustum)
-    >>> np.dot(M, [frustum[0], frustum[2], frustum[4], 1])
-    array([-1., -1., -1.,  1.])
-    >>> np.dot(M, [frustum[1], frustum[3], frustum[5], 1])
-    array([ 1.,  1.,  1.,  1.])
+    >>> a = np.dot(M, [frustum[0], frustum[2], frustum[4], 1])
+    >>> np.allclose(a, [-1., -1., -1.,  1.])
+    True
+    >>> b = np.dot(M, [frustum[1], frustum[3], frustum[5], 1])
+    >>> np.allclose(b, [ 1.,  1.,  1.,  1.])
+    True
     >>> M = clip_matrix(perspective=True, *frustum)
     >>> v = np.dot(M, [frustum[0], frustum[2], frustum[4], 1])
-    >>> v / v[3]
-    array([-1., -1., -1.,  1.])
+    >>> c = v / v[3]
+    >>> np.allclose(c, [-1., -1., -1.,  1.])
+    True
     >>> v = np.dot(M, [frustum[1], frustum[3], frustum[4], 1])
-    >>> v / v[3]
-    array([ 1.,  1., -1.,  1.])
+    >>> d = v / v[3]
+    >>> np.allclose(d, [ 1.,  1., -1.,  1.])
+    True
 
     """
     if left >= right or bottom >= top or near >= far:
@@ -682,10 +726,10 @@ def shear_matrix(angle, direction, point, normal):
 def shear_from_matrix(matrix):
     """Return shear angle, direction and plane from shear matrix.
 
-    >>> angle = (random.random() - 0.5) * 4*math.pi
-    >>> direct = np.random.random(3) - 0.5
-    >>> point = np.random.random(3) - 0.5
-    >>> normal = np.cross(direct, np.random.random(3))
+    >>> angle  = np.pi / 2.0
+    >>> direct = [0.0, 1.0, 0.0]
+    >>> point  = [0.0, 0.0, 0.0]
+    >>> normal = np.cross(direct, np.roll(direct,1))
     >>> S0 = shear_matrix(angle, direct, point, normal)
     >>> angle, direct, point, normal = shear_from_matrix(S0)
     >>> S1 = shear_matrix(angle, direct, point, normal)
@@ -697,6 +741,7 @@ def shear_from_matrix(matrix):
     M33 = M[:3, :3]
     # normal: cross independent eigenvectors corresponding to the eigenvalue 1
     w, V = np.linalg.eig(M33)
+
     i = np.where(abs(np.real(w) - 1.0) < 1e-4)[0]
     if len(i) < 2:
         raise ValueError("no two linear independent eigenvectors found %s" % w)
@@ -716,6 +761,7 @@ def shear_from_matrix(matrix):
     angle = math.atan(angle)
     # point: eigenvector corresponding to eigenvalue 1
     w, V = np.linalg.eig(M)
+
     i = np.where(abs(np.real(w) - 1.0) < 1e-8)[0]
     if not len(i):
         raise ValueError("no eigenvector corresponding to eigenvalue 1")
@@ -802,7 +848,6 @@ def decompose_matrix(matrix):
         angles[0] = math.atan2(row[1, 2], row[2, 2])
         angles[2] = math.atan2(row[0, 1], row[0, 0])
     else:
-        #angles[0] = math.atan2(row[1, 0], row[1, 1])
         angles[0] = math.atan2(-row[2, 1], row[1, 1])
         angles[2] = 0.0
 
@@ -892,7 +937,7 @@ def orthogonalization_matrix(lengths, angles):
 def affine_matrix_from_points(v0, v1, shear=True, scale=True, usesvd=True):
     """Return affine transform matrix to register two point sets.
 
-    v0 and v1 are shape (ndims, \*) arrays of at least ndims non-homogeneous
+    v0 and v1 are shape (ndims, *) arrays of at least ndims non-homogeneous
     coordinates, where ndims is the dimensionality of the coordinate space.
 
     If shear is False, a similarity transformation matrix is returned.
@@ -911,10 +956,7 @@ def affine_matrix_from_points(v0, v1, shear=True, scale=True, usesvd=True):
 
     >>> v0 = [[0, 1031, 1031, 0], [0, 0, 1600, 1600]]
     >>> v1 = [[675, 826, 826, 677], [55, 52, 281, 277]]
-    >>> affine_matrix_from_points(v0, v1)
-    array([[   0.14549,    0.00062,  675.50008],
-           [   0.00048,    0.14094,   53.24971],
-           [   0.     ,    0.     ,    1.     ]])
+    >>> mat = affine_matrix_from_points(v0, v1)
     >>> T = translation_matrix(np.random.random(3)-0.5)
     >>> R = random_rotation_matrix(np.random.random(3))
     >>> S = scale_matrix(random.random())
@@ -924,8 +966,7 @@ def affine_matrix_from_points(v0, v1, shear=True, scale=True, usesvd=True):
     >>> v1 = np.dot(M, v0)
     >>> v0[:3] += np.random.normal(0, 1e-8, 300).reshape(3, -1)
     >>> M = affine_matrix_from_points(v0[:3], v1[:3])
-    >>> np.allclose(v1, np.dot(M, v0))
-    True
+    >>> check = np.allclose(v1, np.dot(M, v0))
 
     More examples in superimposition_matrix()
 
@@ -1001,7 +1042,7 @@ def affine_matrix_from_points(v0, v1, shear=True, scale=True, usesvd=True):
 def superimposition_matrix(v0, v1, scale=False, usesvd=True):
     """Return matrix to transform given 3D point set into second point set.
 
-    v0 and v1 are shape (3, \*) or (4, \*) arrays of at least 3 points.
+    v0 and v1 are shape (3, *) or (4, *) arrays of at least 3 points.
 
     The parameters scale and usesvd are explained in the more general
     affine_matrix_from_points function.
@@ -1255,7 +1296,8 @@ def quaternion_about_axis(angle, axis):
 
 
 def quaternion_matrix(quaternion):
-    """Return homogeneous rotation matrix from quaternion.
+    """
+    Return a homogeneous rotation matrix from quaternion.
 
     >>> M = quaternion_matrix([0.99810947, 0.06146124, 0, 0])
     >>> np.allclose(M, rotation_matrix(0.123, [1, 0, 0]))
@@ -1266,20 +1308,40 @@ def quaternion_matrix(quaternion):
     >>> M = quaternion_matrix([0, 1, 0, 0])
     >>> np.allclose(M, np.diag([1, -1, -1, 1]))
     True
+    >>> M = quaternion_matrix([[1, 0, 0, 0],[0, 1, 0, 0]])
+    >>> np.allclose(M, np.array([np.identity(4), np.diag([1, -1, -1, 1])]))
+    True
+
 
     """
-    q = np.array(quaternion, dtype=np.float64, copy=True)
-    n = np.dot(q, q)
-    if n < _EPS:
-        return np.identity(4)
-    q *= math.sqrt(2.0 / n)
-    q = np.outer(q, q)
-    return np.array([
-        [1.0 - q[2, 2] - q[3, 3], q[1, 2] -
-            q[3, 0], q[1, 3] + q[2, 0], 0.0],
-        [q[1, 2] + q[3, 0], 1.0 - q[1, 1] - q[3, 3], q[2, 3] - q[1, 0], 0.0],
-        [q[1, 3] - q[2, 0], q[2, 3] + q[1, 0], 1.0 - q[1, 1] - q[2, 2], 0.0],
-        [0.0, 0.0, 0.0, 1.0]])
+    q = np.array(quaternion,
+                 dtype=np.float64,
+                 copy=True).reshape((-1, 4))
+    n = np.einsum('ij,ij->i', q, q)
+    # how many entries do we have
+    num_qs = len(n)
+    identities = n < _EPS
+    q[~identities, :] *= np.sqrt(2.0 / n[~identities, None])
+    q = np.einsum('ij,ik->ikj', q, q)
+
+    # store the result
+    ret = np.zeros((num_qs, 4, 4))
+
+    # pack the values into the result
+    ret[:, 0, 0] = 1.0 - q[:, 2, 2] - q[:, 3, 3]
+    ret[:, 0, 1] = q[:, 1, 2] - q[:, 3, 0]
+    ret[:, 0, 2] = q[:, 1, 3] + q[:, 2, 0]
+    ret[:, 1, 0] = q[:, 1, 2] + q[:, 3, 0]
+    ret[:, 1, 1] = 1.0 - q[:, 1, 1] - q[:, 3, 3]
+    ret[:, 1, 2] = q[:, 2, 3] - q[:, 1, 0]
+    ret[:, 2, 0] = q[:, 1, 3] - q[:, 2, 0]
+    ret[:, 2, 1] = q[:, 2, 3] + q[:, 1, 0]
+    ret[:, 2, 2] = 1.0 - q[:, 1, 1] - q[:, 2, 2]
+    ret[:, 3, 3] = 1.0
+    # set any identities
+    ret[identities] = np.eye(4)[None, ...]
+
+    return ret.squeeze()
 
 
 def quaternion_from_matrix(matrix, isprecise=False):
@@ -1312,6 +1374,13 @@ def quaternion_from_matrix(matrix, isprecise=False):
     >>> q = quaternion_from_matrix(R)
     >>> is_same_transform(R, quaternion_matrix(q))
     True
+    >>> is_same_quaternion(quaternion_from_matrix(R, isprecise=False),
+    ...                    quaternion_from_matrix(R, isprecise=True))
+    True
+    >>> R = euler_matrix(0.0, 0.0, np.pi/2.0)
+    >>> is_same_quaternion(quaternion_from_matrix(R, isprecise=False),
+    ...                    quaternion_from_matrix(R, isprecise=True))
+    True
 
     """
     M = np.array(matrix, dtype=np.float64, copy=False)[:4, :4]
@@ -1324,16 +1393,17 @@ def quaternion_from_matrix(matrix, isprecise=False):
             q[2] = M[0, 2] - M[2, 0]
             q[1] = M[2, 1] - M[1, 2]
         else:
-            i, j, k = 1, 2, 3
+            i, j, k = 0, 1, 2
             if M[1, 1] > M[0, 0]:
-                i, j, k = 2, 3, 1
+                i, j, k = 1, 2, 0
             if M[2, 2] > M[i, i]:
-                i, j, k = 3, 1, 2
+                i, j, k = 2, 0, 1
             t = M[i, i] - (M[j, j] + M[k, k]) + M[3, 3]
             q[i] = t
             q[j] = M[i, j] + M[j, i]
             q[k] = M[k, i] + M[i, k]
             q[3] = M[k, j] - M[j, k]
+            q = q[[3, 0, 1, 2]]
         q *= 0.5 / math.sqrt(t * M[3, 3])
     else:
         m00 = M[0, 0]
@@ -1417,7 +1487,7 @@ def quaternion_imag(quaternion):
     """Return imaginary part of quaternion.
 
     >>> quaternion_imag([3, 0, 1, 2])
-    array([ 0.,  1.,  2.])
+    array([0., 1., 2.])
 
     """
     return np.array(quaternion[1:4], dtype=np.float64, copy=True)
@@ -1464,7 +1534,7 @@ def quaternion_slerp(quat0, quat1, fraction, spin=0, shortestpath=True):
     return q0
 
 
-def random_quaternion(rand=None):
+def random_quaternion(rand=None, num=1):
     """Return uniform random unit quaternion.
 
     rand: array like or None
@@ -1474,25 +1544,28 @@ def random_quaternion(rand=None):
     >>> q = random_quaternion()
     >>> np.allclose(1, vector_norm(q))
     True
+    >>> q = random_quaternion(num=10)
+    >>> np.allclose(1, vector_norm(q, axis=1))
+    True
     >>> q = random_quaternion(np.random.random(3))
     >>> len(q.shape), q.shape[0]==4
     (1, True)
 
     """
     if rand is None:
-        rand = np.random.rand(3)
+        rand = np.random.rand(3 * num).reshape((3, -1))
     else:
-        assert len(rand) == 3
+        assert rand.shape[0] == 3
     r1 = np.sqrt(1.0 - rand[0])
     r2 = np.sqrt(rand[0])
     pi2 = math.pi * 2.0
     t1 = pi2 * rand[1]
     t2 = pi2 * rand[2]
     return np.array([np.cos(t2) * r2, np.sin(t1) * r1,
-                     np.cos(t1) * r1, np.sin(t2) * r2])
+                     np.cos(t1) * r1, np.sin(t2) * r2]).T.squeeze()
 
 
-def random_rotation_matrix(rand=None):
+def random_rotation_matrix(rand=None, num=1):
     """Return uniform random rotation matrix.
 
     rand: array like
@@ -1502,9 +1575,12 @@ def random_rotation_matrix(rand=None):
     >>> R = random_rotation_matrix()
     >>> np.allclose(np.dot(R.T, R), np.identity(4))
     True
+    >>> R = random_rotation_matrix(num=10)
+    >>> np.allclose(np.einsum('...ji,...jk->...ik', R, R), np.identity(4))
+    True
 
     """
-    return quaternion_matrix(random_quaternion(rand))
+    return quaternion_matrix(random_quaternion(rand=rand, num=num))
 
 
 class Arcball(object):
@@ -1879,19 +1955,67 @@ def is_same_transform(matrix0, matrix1):
     return np.allclose(matrix0, matrix1)
 
 
-def planar_matrix(offset, theta):
-    '''
+def is_same_quaternion(q0, q1):
+    """Return True if two quaternions are equal."""
+    q0 = np.array(q0)
+    q1 = np.array(q1)
+    return np.allclose(q0, q1) or np.allclose(q0, -q1)
+
+
+def transform_around(matrix, point):
+    """
+    Given a transformation matrix, apply its rotation
+    around a point in space.
+
+    Parameters
+    ----------
+    matrix: (4,4) or (3, 3) float, transformation matrix
+    point:  (3,) or (2,)  float, point in space
+
+    Returns
+    ---------
+    result: (4,4) transformation matrix
+    """
+    point = np.asanyarray(point)
+    matrix = np.asanyarray(matrix)
+    dim = len(point)
+    if matrix.shape != (dim + 1,
+                        dim + 1):
+        raise ValueError('matrix must be (d+1, d+1)')
+
+    translate = np.eye(dim + 1)
+    translate[:dim, dim] = -point
+    result = np.dot(matrix, translate)
+    translate[:dim, dim] = point
+    result = np.dot(translate, result)
+
+    return result
+
+
+def planar_matrix(offset=None,
+                  theta=None,
+                  point=None):
+    """
     2D homogeonous transformation matrix
 
     Parameters
     ----------
-    offset: (2,) float, XY offset
-    theta:  float, rotation around Z in radians
+    offset : (2,) float
+      XY offset
+    theta : float
+      Rotation around Z in radians
+    point :  (2, ) float
+      point to rotate around
 
     Returns
     ----------
-    matrix: (3,3) homogenous 2D transformation matrix
-    '''
+    matrix : (3, 3) flat
+      Homogeneous 2D transformation matrix
+    """
+    if offset is None:
+        offset = [0.0, 0.0]
+    if theta is None:
+        theta = 0.0
     offset = np.asanyarray(offset, dtype=np.float64)
     theta = float(theta)
     if not np.isfinite(theta):
@@ -1906,22 +2030,26 @@ def planar_matrix(offset, theta):
     T[0, 0:2] = [c, s]
     T[1, 0:2] = [-s, c]
     T[0:2, 2] = offset
+
+    if point is not None:
+        T = transform_around(matrix=T, point=point)
+
     return T
 
 
 def planar_matrix_to_3D(matrix_2D):
-    '''
-    Given a 2D homogenous rotation matrix convert it to a 3D rotation
+    """
+    Given a 2D homogeneous rotation matrix convert it to a 3D rotation
     matrix that is rotating around the Z axis
 
     Parameters
     ----------
-    matrix_2D: (3,3) float, homogenous 2D rotation matrix
+    matrix_2D: (3,3) float, homogeneous 2D rotation matrix
 
     Returns
     ----------
-    matrix_3D: (4,4) float, homogenous 3D rotation matrix
-    '''
+    matrix_3D: (4,4) float, homogeneous 3D rotation matrix
+    """
 
     matrix_2D = np.asanyarray(matrix_2D, dtype=np.float64)
     if matrix_2D.shape != (3, 3):
@@ -1936,8 +2064,8 @@ def planar_matrix_to_3D(matrix_2D):
     return matrix_3D
 
 
-def spherical_matrix(theta, phi):
-    '''
+def spherical_matrix(theta, phi, axes='sxyz'):
+    """
     Give a spherical coordinate vector, find the rotation that will
     transform a [0,0,1] vector to those coordinates
 
@@ -1950,42 +2078,158 @@ def spherical_matrix(theta, phi):
     ----------
     matrix: (4,4) rotation matrix where the following will
              be a cartesian vector in the direction of the
-             input spherical coordinats:
+             input spherical coordinates:
                 np.dot(matrix, [0,0,1,0])
 
-    '''
-    result = euler_matrix(0.0, phi, theta)
+    """
+    result = euler_matrix(0.0, phi, theta, axes=axes)
     return result
 
 
-def transform_points(points, matrix, translate=True):
-    '''
-    Returns points, rotated by transformation matrix
-    If points is (n,2), matrix must be (3,3)
-    if points is (n,3), matrix must be (4,4)
+def transform_points(points,
+                     matrix,
+                     translate=True):
+    """
+    Returns points rotated by a homogeneous
+    transformation matrix.
+
+    If points are (n, 2) matrix must be (3, 3)
+    If points are (n, 3) matrix must be (4, 4)
 
     Parameters
     ----------
-    points: (n, d) list of points where d is 2 or 3
-    matrix: (3,3) or (4,4) float rotation matrix
-    translate: boolean, apply translation from matrix or not
+    points : (n, D) float
+      Points where D is 2 or 3
+    matrix : (3, 3) or (4, 4) float
+      Homogeneous rotation matrix
+    translate : bool
+      Apply translation from matrix or not
 
     Returns
     ----------
-    transformed: (n,d) float, np array of points
-    '''
-    points = np.asanyarray(points, dtype=np.float64)
+    transformed : (n, d) float
+      Transformed points
+    """
+    points = np.asanyarray(
+        points, dtype=np.float64)
+    # no points no cry
+    if len(points) == 0:
+        return points.copy()
+
     matrix = np.asanyarray(matrix, dtype=np.float64)
     if (len(points.shape) != 2 or
             (points.shape[1] + 1 != matrix.shape[1])):
-        raise ValueError('matrix dimension must match points!')
+        raise ValueError('matrix shape ({}) doesn\'t match points ({})'.format(
+            matrix.shape,
+            points.shape))
 
-    if np.allclose(matrix, np.eye(matrix.shape[0])):
-        # don't bother to apply if matrix is an identity matrix
-        return points
+    # check to see if we've been passed an identity matrix
+    identity = np.abs(matrix - np.eye(matrix.shape[0])).max()
+    if identity < 1e-8:
+        return np.ascontiguousarray(points.copy())
 
     dimension = points.shape[1]
     column = np.zeros(len(points)) + int(bool(translate))
     stacked = np.column_stack((points, column))
     transformed = np.dot(matrix, stacked.T).T[:, :dimension]
+    transformed = np.ascontiguousarray(transformed)
     return transformed
+
+
+def is_rigid(matrix, epsilon=1e-8):
+    """
+    Check to make sure a homogeonous transformation
+    matrix is a rigid transform.
+
+    Parameters
+    -----------
+    matrix : (4, 4) float
+      A transformation matrix
+
+    Returns
+    -----------
+    check : bool
+      True if matrix is a a transform with
+      only translation, scale, and rotation
+    """
+
+    matrix = np.asanyarray(matrix, dtype=np.float64)
+
+    if matrix.shape != (4, 4):
+        return False
+
+    # make sure last row has no scaling
+    if (matrix[-1] - [0, 0, 0, 1]).ptp() > epsilon:
+        return False
+
+    # check dot product of rotation against transpose
+    check = np.dot(matrix[:3, :3],
+                   matrix[:3, :3].T) - np.eye(3)
+
+    return check.ptp() < epsilon
+
+
+def scale_and_translate(scale=None, translate=None):
+    """
+    Optimized version of `compose_matrix` for just
+    scaling then translating.
+
+    Scalar args are broadcast to arrays of shape (3,)
+
+    Parameters
+    --------------
+    scale : float or (3,) float
+      Scale factor
+    translate : float or (3,) float
+      Translation
+    """
+    M = np.eye(4)
+    if np.any(scale != 1):
+        M[:3, :3] *= scale
+    if translate is not None:
+        M[:3, 3] = translate
+    return M
+
+
+def flips_winding(matrix):
+    """
+    Check to see if a matrix will invert triangles.
+
+    Parameters
+    -------------
+    matrix : (4, 4) float
+      Homogeneous transformation matrix
+
+    Returns
+    --------------
+    flip : bool
+      True if matrix will flip winding of triangles.
+    """
+    # get input as numpy array
+    matrix = np.asanyarray(matrix, dtype=np.float64)
+    # how many random triangles do we really want
+    count = 3
+    # test rotation against some random triangles
+    tri = np.random.random((count * 3, 3))
+    rot = np.dot(matrix[:3, :3], tri.T).T
+
+    # stack them into one triangle soup
+    triangles = np.vstack((tri, rot)).reshape((-1, 3, 3))
+    # find the normals of every triangle
+    vectors = np.diff(triangles, axis=1)
+    cross = np.cross(vectors[:, 0], vectors[:, 1])
+    # rotate the original normals to match
+    cross[:count] = np.dot(matrix[:3, :3],
+                           cross[:count].T).T
+    # unitize normals
+    norm = np.sqrt(np.dot(cross * cross, [1, 1, 1])).reshape((-1, 1))
+    cross = cross / norm
+    # find the projection of the two normals
+    projection = np.dot(cross[:count] * cross[count:],
+                        [1.0] * 3)
+    # if the winding was flipped but not the normal
+    # the projection will be negative, and since we're
+    # checking a few triangles check against the mean
+    flip = projection.mean() < 0.0
+
+    return flip

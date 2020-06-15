@@ -1,66 +1,74 @@
-'''
-A basic, slow implementation of ray- triangle queries. 
-'''
+"""
+A basic slow implementation of ray- triangle queries.
+"""
 import numpy as np
 
+
+from .ray_util import contains_points
+
 from ..constants import tol
-from ..grouping import unique_rows
 
 from .. import util
+from .. import caching
+from .. import grouping
 from .. import intersections
 from .. import triangles as triangles_mod
 
 
-class RayMeshIntersector:
-    '''
+class RayMeshIntersector(object):
+    """
     An object to query a mesh for ray intersections.
     Precomputes an r-tree for each triangle on the mesh.
-    '''
+    """
 
     def __init__(self, mesh):
         self.mesh = mesh
-        self._cache = util.Cache(self.mesh.crc)
-
-    @property
-    def tree(self):
-        if 'tree' in self._cache:
-            return self._cache.get('tree')
-        else:
-            return self._cache.set('tree',
-                                   self.mesh.triangles_tree())
+        self._cache = caching.Cache(self.mesh.crc)
 
     def intersects_id(self,
                       ray_origins,
                       ray_directions,
                       return_locations=False,
+                      multiple_hits=True,
                       **kwargs):
-        '''
-        Find the intersections between the current mesh and a list of rays.
+        """
+        Find the intersections between the current mesh and an
+        array of rays.
 
         Parameters
-        ----------
-        ray_origins:      (m,3) float, ray origin points
-        ray_directions:   (m,3) float, ray direction vectors
-        multiple_hits:    bool, consider multiple hits of each ray or not
-        return_locations: bool, return hit locations or not
+        ------------
+        ray_origins :  (m, 3) float
+          Ray origin points
+        ray_directions : (m, 3) float
+          Ray direction vectors
+        multiple_hits :  bool
+          Consider multiple hits of each ray or not
+        return_locations : bool
+          Return hit locations or not
 
         Returns
         -----------
-        index_triangle: (h,) int,    index of triangles hit
-        index_ray:      (h,) int,    index of ray that hit triangle
-        locations:      (h,3) float, (optional) position of intersection in space
-        '''
+        index_triangle : (h,) int
+          Index of triangles hit
+        index_ray : (h,) int
+          Index of ray that hit triangle
+        locations : (h, 3) float
+          [optional] Position of intersection in space
+        """
         (index_tri,
          index_ray,
-         locations) = ray_triangle_id(triangles=self.mesh.triangles,
-                                      ray_origins=ray_origins,
-                                      ray_directions=ray_directions,
-                                      tree=self.tree,
-                                      triangles_normal=self.mesh.face_normals)
+         locations) = ray_triangle_id(
+             triangles=self.mesh.triangles,
+             ray_origins=ray_origins,
+             ray_directions=ray_directions,
+             tree=self.mesh.triangles_tree,
+             multiple_hits=multiple_hits,
+             triangles_normal=self.mesh.face_normals)
         if return_locations:
-            unique = unique_rows(np.column_stack((locations, index_ray)))[0]
-            if len(unique) == 0:
-                return [], [], []
+            if len(index_tri) == 0:
+                return index_tri, index_ray, locations
+            unique = grouping.unique_rows(
+                np.column_stack((locations, index_ray)))[0]
             return index_tri[unique], index_ray[unique], locations[unique]
         return index_tri, index_ray
 
@@ -68,44 +76,56 @@ class RayMeshIntersector:
                             ray_origins,
                             ray_directions,
                             **kwargs):
-        '''
+        """
         Return unique cartesian locations where rays hit the mesh.
         If you are counting the number of hits a ray had, this method
         should be used as if only the triangle index is used on- edge hits
         will be counted twice.
 
         Parameters
-        ---------
-        rays: (n, 2, 3) array of ray origins and directions
-        return_id: boolean flag, if True return triangle indexes
+        ------------
+        ray_origins : (m, 3) float
+          Ray origin points
+        ray_directions : (m, 3) float
+          Ray direction vectors
 
         Returns
         ---------
-        locations: (n) sequence of (m,3) intersection points
-        index_ray     (n) list of face ids
-        '''
+        locations : (n) sequence of (m,3) float
+          Intersection points
+        index_ray : (n,) int
+          Array of ray indexes
+        index_tri: (n,) int
+          Array of triangle (face) indexes
+        """
         (index_tri,
          index_ray,
-         locations) = self.intersects_id(ray_origins=ray_origins,
-                                         ray_directions=ray_directions,
-                                         return_locations=True)
-        return locations, index_ray
+         locations) = self.intersects_id(
+             ray_origins=ray_origins,
+             ray_directions=ray_directions,
+             return_locations=True,
+             **kwargs)
+        return locations, index_ray, index_tri
 
     def intersects_any(self,
                        ray_origins,
                        ray_directions,
                        **kwargs):
-        '''
+        """
         Find out if each ray hit any triangle on the mesh.
 
         Parameters
-        ---------
-        ray_origins: (n
+        ------------
+        ray_origins : (m, 3) float
+          Ray origin points
+        ray_directions : (m, 3) float
+          Ray direction vectors
 
         Returns
         ---------
-        hit: boolean, whether any ray hit any triangle on the mesh
-        '''
+        hit : (m,) bool
+          Whether any ray hit any triangle on the mesh
+        """
         index_tri, index_ray = self.intersects_id(ray_origins,
                                                   ray_directions)
         hit_any = np.zeros(len(ray_origins), dtype=np.bool)
@@ -114,43 +134,73 @@ class RayMeshIntersector:
             hit_any[hit_idx] = True
         return hit_any
 
+    def contains_points(self, points):
+        """
+        Check if a mesh contains a list of points, using ray tests.
+
+        If the point is on the surface of the mesh the behavior
+        is undefined.
+
+        Parameters
+        ------------
+        points : (n, 3) float
+          Points in space
+
+        Returns
+        ---------
+        contains : (n,) bool
+          Whether point is inside mesh or not
+        """
+
+        return contains_points(self, points)
+
 
 def ray_triangle_id(triangles,
                     ray_origins,
                     ray_directions,
                     triangles_normal=None,
-                    tree=None):
-    '''
+                    tree=None,
+                    multiple_hits=True):
+    """
     Find the intersections between a group of triangles and rays
 
     Parameters
-    ----------
-    triangles:        (n,3,3) float, triangles in space
-    ray_origins:      (m,3) float, ray origin points
-    ray_directions:   (m,3) float, ray direction vectors
-    triangles_normal: (n,3) float, normal vector of triangles, optional
-    tree:             rtree object holding triangle bounds
+    -------------
+    triangles : (n, 3, 3) float
+      Triangles in space
+    ray_origins : (m, 3) float
+      Ray origin points
+    ray_directions : (m, 3) float
+      Ray direction vectors
+    triangles_normal : (n, 3) float
+      Normal vector of triangles, optional
+    tree : rtree.Index
+      Rtree object holding triangle bounds
 
     Returns
     -----------
-    index_triangle: (h,) int,    index of triangles hit
-    index_ray:      (h,) int,    index of ray that hit triangle
-    locations:      (h,3) float, position of intersection in space
-    '''
+    index_triangle : (h,) int
+      Index of triangles hit
+    index_ray : (h,) int
+      Index of ray that hit triangle
+    locations : (h, 3) float
+      Position of intersection in space
+    """
     triangles = np.asanyarray(triangles, dtype=np.float64)
     ray_origins = np.asanyarray(ray_origins, dtype=np.float64)
     ray_directions = np.asanyarray(ray_directions, dtype=np.float64)
 
-    # if we didn't get passed an r-tree for the bounds of each triangle create
-    # one here
+    # if we didn't get passed an r-tree for the bounds of each
+    # triangle create one here
     if tree is None:
         tree = triangles_mod.bounds_tree(triangles)
 
-    # find the list of likely triangles and which ray they correspond to with
-    # rtree queries
-    ray_candidates, ray_id = ray_triangle_candidates(ray_origins=ray_origins,
-                                                     ray_directions=ray_directions,
-                                                     tree=tree)
+    # find the list of likely triangles and which ray they
+    # correspond with, via rtree queries
+    ray_candidates, ray_id = ray_triangle_candidates(
+        ray_origins=ray_origins,
+        ray_directions=ray_directions,
+        tree=tree)
 
     # get subsets which are corresponding rays and triangles
     # (c,3,3) triangle candidates
@@ -162,54 +212,95 @@ def ray_triangle_id(triangles,
     # get the plane origins and normals from the triangle candidates
     plane_origins = triangle_candidates[:, 0, :]
     if triangles_normal is None:
-        plane_normals, triangle_ok = triangles_mod.normals(triangle_candidates)
+        plane_normals, triangle_ok = triangles_mod.normals(
+            triangle_candidates)
         if not triangle_ok.all():
             raise ValueError('Invalid triangles!')
     else:
         plane_normals = triangles_normal[ray_candidates]
 
     # find the intersection location of the rays with the planes
-    location, valid = intersections.planes_lines(plane_origins=plane_origins,
-                                                 plane_normals=plane_normals,
-                                                 line_origins=line_origins,
-                                                 line_directions=line_directions)
+    location, valid = intersections.planes_lines(
+        plane_origins=plane_origins,
+        plane_normals=plane_normals,
+        line_origins=line_origins,
+        line_directions=line_directions)
 
     if (len(triangle_candidates) == 0 or
             not valid.any()):
-        return [], [], []
+        # we got no hits so return early with empty array
+        return (np.array([], dtype=np.int64),
+                np.array([], dtype=np.int64),
+                np.array([], dtype=np.float64))
 
     # find the barycentric coordinates of each plane intersection on the
     # triangle candidates
-    barycentric = triangles_mod.points_to_barycentric(triangle_candidates[valid],
-                                                      location)
+    barycentric = triangles_mod.points_to_barycentric(
+        triangle_candidates[valid], location)
 
-    # the plane intersection is inside the triangle if all barycentric coordinates
-    # are between 0.0 and 1.0
+    # the plane intersection is inside the triangle if all barycentric
+    # coordinates are between 0.0 and 1.0
     hit = np.logical_and((barycentric > -tol.zero).all(axis=1),
                          (barycentric < (1 + tol.zero)).all(axis=1))
 
-    # the result index of the triangle is a candidate with a valid plane intersection and
-    # a triangle which contains the plane intersection point
+    # the result index of the triangle is a candidate with a valid
+    # plane intersection and a triangle which contains the plane
+    # intersection point
     index_tri = ray_candidates[valid][hit]
-    # the ray index is a subset with a valid plane intersection and contained
-    # by a triangle
+    # the ray index is a subset with a valid plane intersection and
+    # contained by a triangle
     index_ray = ray_id[valid][hit]
     # locations are already valid plane intersections, just mask by hits
     location = location[hit]
 
-    return index_tri, index_ray, location
+    # only return points that are forward from the origin
+    vector = location - ray_origins[index_ray]
+    distance = util.diagonal_dot(vector, ray_directions[index_ray])
+    forward = distance > -1e-6
+
+    index_tri = index_tri[forward]
+    index_ray = index_ray[forward]
+    location = location[forward]
+    distance = distance[forward]
+
+    if multiple_hits:
+        return index_tri, index_ray, location
+
+    # since we are not returning multiple hits, we need to
+    # figure out which hit is first
+    if len(index_ray) == 0:
+        return index_tri, index_ray, location
+
+    first = np.zeros(len(index_ray), dtype=np.bool)
+    groups = grouping.group(index_ray)
+    for group in groups:
+        index = group[distance[group].argmin()]
+        first[index] = True
+
+    return index_tri[first], index_ray[first], location[first]
 
 
 def ray_triangle_candidates(ray_origins,
                             ray_directions,
                             tree):
-    '''
+    """
     Do broad- phase search for triangles that the rays
     may intersect.
 
     Does this by creating a bounding box for the ray as it
     passes through the volume occupied by the tree
-    '''
+
+    Parameters
+    ------------
+    ray_origins:      (m,3) float, ray origin points
+    ray_directions:   (m,3) float, ray direction vectors
+    tree:             rtree object, contains AABB of each triangle
+
+    Returns
+    ----------
+    ray_candidates: (n,) int, triangle indexes
+    ray_id:         (n,) int, corresponding ray index for a triangle candidate
+    """
     ray_bounding = ray_bounds(ray_origins=ray_origins,
                               ray_directions=ray_directions,
                               bounds=tree.bounds)
@@ -231,24 +322,28 @@ def ray_bounds(ray_origins,
                ray_directions,
                bounds,
                buffer_dist=1e-5):
-    '''
+    """
     Given a set of rays and a bounding box for the volume of interest
     where the rays will be passing through, find the bounding boxes
     of the rays as they pass through the volume.
 
     Parameters
-    ---------
-    rays: (n,2,3) array of ray origins and directions
-    bounds: (2,3) bounding box (min, max)
-    buffer_dist: float, distance to pad zero width bounding boxes
+    ------------
+    ray_origins:      (m,3) float, ray origin points
+    ray_directions:   (m,3) float, ray direction vectors
+    bounds:           (2,3) bounding box (min, max)
+    buffer_dist:      float, distance to pad zero width bounding boxes
 
     Returns
     ---------
     ray_bounding: (n) set of AABB of rays passing through volume
-    '''
+    """
+
+    ray_origins = np.asanyarray(ray_origins, dtype=np.float64)
+    ray_directions = np.asanyarray(ray_directions, dtype=np.float64)
 
     # bounding box we are testing against
-    bounds = np.array(bounds)
+    bounds = np.asanyarray(bounds)
 
     # find the primary axis of the vector
     axis = np.abs(ray_directions).argmax(axis=1)
@@ -281,7 +376,8 @@ def ray_bounds(ray_origins,
         (on_a, on_b)).reshape(
         (-1, 2, ray_directions.shape[1]))
 
-    ray_bounding = np.hstack((on_plane.min(axis=1), on_plane.max(axis=1)))
+    ray_bounding = np.hstack((on_plane.min(axis=1),
+                              on_plane.max(axis=1)))
     # pad the bounding box by TOL_BUFFER
     # not sure if this is necessary, but if the ray is  axis aligned
     # this function will otherwise return zero volume bounding boxes

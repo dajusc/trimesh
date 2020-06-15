@@ -1,3 +1,10 @@
+"""
+integrate.py
+--------------
+
+Utilities for integrating functions over meshes surfaces.
+"""
+
 import sympy as sp
 from sympy.parsing.sympy_parser import parse_expr as sympy_parse
 
@@ -6,7 +13,7 @@ from . import util
 
 
 def symbolic_barycentric(function):
-    '''
+    """
     Symbolically integrate a function(x,y,z) across a triangle or mesh.
 
     Parameters
@@ -20,7 +27,7 @@ def symbolic_barycentric(function):
     evaluator: numpy lambda function of result which takes a mesh
     expr:      sympy expression of result
 
-    Example
+    Examples
     -----------
 
     In [1]: function = '1'
@@ -40,17 +47,17 @@ def symbolic_barycentric(function):
 
     In [7]: result.sum()
     Out[7]: 34.641016151377542
-    '''
+    """
 
     class evaluator:
 
         def __init__(self, expr, expr_args):
             self.lambdified = sp.lambdify(args=expr_args,
                                           expr=expr,
-                                          modules='numpy')
+                                          modules=['numpy', 'sympy'])
 
         def __call__(self, mesh, *args):
-            '''
+            """
             Quickly evaluate the surface integral across a mesh
 
             Parameters
@@ -60,7 +67,7 @@ def symbolic_barycentric(function):
             Returns
             ----------
             integrated: (len(faces),) float, integral evaluated for each face
-            '''
+            """
             integrated = self.lambdified(*mesh.triangles.reshape((-1, 9)).T)
             integrated *= 2 * mesh.area_faces
             return integrated
@@ -91,11 +98,11 @@ def substitute_barycentric(function):
                         real=True,
                         positive=True)
     # vertices of the triangles
-    x1, x2, x3, y1, y2, y3, z1, z2, z3 = sp.symbols('x1,x2,x3,y1,y2,y3,z1,z2,z3',
-                                                    real=True)
+    x1, x2, x3, y1, y2, y3, z1, z2, z3 = sp.symbols(
+        'x1,x2,x3,y1,y2,y3,z1,z2,z3', real=True)
 
     # generate the substitution dictionary to convert from cartesian to barycentric
-    # since the input could have been a sympy expresion or a string
+    # since the input could have been a sympy expression or a string
     # that we parsed substitute based on name to avoid id(x) issues
     substitutions = {}
     for symbol in function.free_symbols:

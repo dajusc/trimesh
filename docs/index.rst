@@ -1,16 +1,30 @@
-.. trimesh documentation master file, created by
-   sphinx-quickstart on Sat Apr  1 16:02:58 2017.
-   You can adapt this file completely to your liking, but it should at least
-   contain the root `toctree` directive.
-
  .. toctree::
    :maxdepth: 2
-
+  
 .. include:: README.rst
+
+Links
+==========
+.. toctree::
+   Trimesh On Github <http://github.com/mikedh/trimesh>
+
+Install
+==========
+.. toctree::
+   :maxdepth: 2
 	      
-Module Reference
-==================
-* :ref:`modindex`
+   install
 
+Examples
+==========
+.. toctree::
+   :maxdepth: 2
+	      
+   examples
 
-
+API Reference
+=============
+.. toctree::
+   :maxdepth: 1
+   
+   trimesh

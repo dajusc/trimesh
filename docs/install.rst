@@ -1,44 +1,48 @@
 Advanced Installation
 =====================
 
-The minimum set of packages required to import ``trimesh`` are
-`numpy <http://www.numpy.org/>`__, `scipy <http://www.scipy.org/>`__ and
-`networkx <https://networkx.github.io/>`__.
+The only thing required to install ``trimesh`` is `numpy <http://www.numpy.org/>`__.
 
-Ubuntu Pre-install
-''''''''''''''''''
-
-Blender and openSCAD are backends used for boolean operations,
-libspatialindex and libgeos are the libraries used by RTree and Shapely
-respectivly, and cmake is included to build assimp if you want the
-latest version.
+All other dependencies are 'soft,' or trimesh will raise the ``ImportError`` at runtime if a function is called that requires a package that isn't installed. If you do the most basic install of ``trimesh`` it will only install ``numpy``:
 
 .. code:: bash
 
-    sudo apt-get install cmake openscad blender libspatialindex-dev libgeos-dev
+   pip install trimesh
 
-Windows Pre-Install:
+If you'd like most soft dependencies which should install cleanly, you can use the ``easy`` pip extra:
+
+.. code:: bash
+
+   pip install trimesh[easy]
+
+
+	  
+Conda Install
+'''''''''''''
+
+The easiest way to get going on the most platforms is through a Python provided by conda. You can install `Miniconda <https://conda.io/docs/install/quick.html>`__ easily on all major platforms. Then, to install ``trimesh``:
+
+.. code:: bash
+
+   conda install -c conda-forge scikit-image shapely rtree pyembree
+
+   # install trimesh and all possible dependencies
+   # if this fails try: pip install trimesh[easy]
+   pip install trimesh[all]
+
+
+Ubuntu Notes
+''''''''''''''''''
+
+Blender and openSCAD are soft dependencies used for boolean operations with subprocess, you can get them with apt:
+
+.. code:: bash
+
+   sudo apt-get install openscad blender
+
+Windows Notes
 ''''''''''''''''''''
 
 The easiest way to get going on Windows is to install the `Anaconda
-Python distribution <https://www.continuum.io/downloads>`__, followed by
-``shapely``, ``rtree``, and ``meshpy`` from the `Unofficial Windows
-Binaries from Christoph
-Gohlke <http://www.lfd.uci.edu/~gohlke/pythonlibs/>`__
+Python distribution <https://www.continuum.io/downloads>`__.
 
-Optional Dependencies
-'''''''''''''''''''''
-
-To install the latest assimp for `additional import
-formats <http://www.assimp.org/main_features_formats.html>`__
-(python-pyassimp in Ubuntu 14.04 is very old):
-
-.. code:: bash
-
-    sudo pip install git+https://github.com/robotics/assimp_latest.git
-
-If you are using a lot of graph operations (specifically mesh.split)
-trimesh will automatically use
-`graph-tool <https://graph-tool.skewed.de/download>`__ if it is
-installed, for a roughly 10x speedup over networkx on certain
-operations.

@@ -1,119 +1,186 @@
+"""
+Ray queries using the pyembree package with the
+API wrapped to match our native raytracer.
+"""
 import numpy as np
 
-from collections import deque
 from copy import deepcopy
 
+from pyembree import __version__ as _ver
 from pyembree import rtcore_scene
 from pyembree.mesh_construction import TriangleMesh
 
+from pkg_resources import parse_version
+
+from .ray_util import contains_points
+
 from .. import util
+from .. import caching
 from .. import intersections
+
+from ..constants import log_time
 
 # the factor of geometry.scale to offset a ray from a triangle
 # to reliably not hit its origin triangle
 _ray_offset_factor = 1e-4
-# for very small meshes, we want to clip our offset to a sane distance
-_ray_offset_floor  = 1e-8
+# we want to clip our offset to a sane distance
+_ray_offset_floor = 1e-8
 
-class RayMeshIntersector:
+# see if we're using a newer version of the pyembree wrapper
+_embree_new = parse_version(_ver) >= parse_version('0.1.4')
+# both old and new versions require exact but different type
+_embree_dtype = [np.float64, np.float32][int(_embree_new)]
 
-    def __init__(self, geometry):
-        self._geometry = geometry
-        self._cache = util.Cache(id_function=self._geometry.crc)
 
-    @util.cache_decorator
+class RayMeshIntersector(object):
+
+    def __init__(self,
+                 geometry,
+                 scale_to_box=True):
+        """
+        Do ray- mesh queries.
+
+        Parameters
+        -------------
+        geometry : Trimesh object
+          Mesh to do ray tests on
+        scale_to_box : bool
+          If true, will scale mesh to approximate
+          unit cube to avoid problems with extreme
+          large or small meshes.
+        """
+        self.mesh = geometry
+        self._scale_to_box = scale_to_box
+        self._cache = caching.Cache(id_function=self.mesh.crc)
+
+    @property
+    def _scale(self):
+        """
+        Scaling factor for precision.
+        """
+        if self._scale_to_box:
+            # scale vertices to approximately a cube to help with
+            # numerical issues at very large/small scales
+            scale = 100.0 / self.mesh.scale
+        else:
+            scale = 1.0
+        return scale
+
+    @caching.cache_decorator
     def _scene(self):
-        '''
+        """
         A cached version of the pyembree scene.
-        '''
-        scene = rtcore_scene.EmbreeScene()
-        mesh = TriangleMesh(scene, self._geometry.triangles)
-        return scene
+        """
+        return _EmbreeWrap(vertices=self.mesh.vertices,
+                           faces=self.mesh.faces,
+                           scale=self._scale)
 
     def intersects_location(self,
                             ray_origins,
                             ray_directions,
                             multiple_hits=True):
-        '''
+        """
         Return the location of where a ray hits a surface.
 
         Parameters
         ----------
-        ray_origins:    (n,3) float, origins of rays
-        ray_directions: (n,3) float, direction (vector) of rays
-
+        ray_origins : (n, 3) float
+          Origins of rays
+        ray_directions : (n, 3) float
+          Direction (vector) of rays
 
         Returns
         ---------
-        locations: (m,3) float, points where the ray intersects the surface
-        ray_index: (m,) int, index of which ray location is from
-        '''
+        locations : (m) sequence of (p, 3) float
+          Intersection points
+        index_ray : (m,) int
+          Indexes of ray
+        index_tri : (m,) int
+          Indexes of mesh.faces
+        """
         (index_tri,
          index_ray,
-         locations) = self.intersects_id(ray_origins=ray_origins,
-                                         ray_directions=ray_directions,
-                                         multiple_hits=multiple_hits,
-                                         return_locations=True)
+         locations) = self.intersects_id(
+             ray_origins=ray_origins,
+             ray_directions=ray_directions,
+             multiple_hits=multiple_hits,
+             return_locations=True)
 
-        return locations, index_ray
+        return locations, index_ray, index_tri
 
+    @log_time
     def intersects_id(self,
                       ray_origins,
                       ray_directions,
                       multiple_hits=True,
-                      max_hits=100,
+                      max_hits=20,
                       return_locations=False):
-        '''
-        Find the triangles hit by a list of rays, including optionally 
-        multiple hits along a single ray. 
+        """
+        Find the triangles hit by a list of rays, including
+        optionally multiple hits along a single ray.
+
 
         Parameters
         ----------
-        ray_origins:      (n,3) float, origins of rays
-        ray_directions:   (n,3) float, direction (vector) of rays
-        multiple_hits:    bool, if True will return every hit along the ray
-                                if False will only return first hit
-        return_locations: bool, should we return hit locations or not
+        ray_origins : (n, 3) float
+          Origins of rays
+        ray_directions : (n, 3) float
+          Direction (vector) of rays
+        multiple_hits : bool
+          If True will return every hit along the ray
+          If False will only return first hit
+        max_hits : int
+          Maximum number of hits per ray
+        return_locations : bool
+          Should we return hit locations or not
 
         Returns
-        ----------
-        index_tri: (m,) int, index of triangle the ray hit
-        index_ray: (m,) int, index of ray
-        locations: (m,3) float, locations in space
-        '''
-        # make sure input is float64 for embree
-        ray_origins = np.asanyarray(deepcopy(ray_origins), dtype=np.float64)
-        ray_directions = np.asanyarray(ray_directions, dtype=np.float64)
+        ---------
+        index_tri : (m,) int
+          Indexes of mesh.faces
+        index_ray : (m,) int
+          Indexes of ray
+        locations : (m) sequence of (p, 3) float
+          Intersection points, only returned if return_locations
+        """
+        # make sure input is _dtype for embree
+        ray_origins = np.asanyarray(
+            deepcopy(ray_origins),
+            dtype=np.float64)
+        ray_directions = np.asanyarray(ray_directions,
+                                       dtype=np.float64)
         ray_directions = util.unitize(ray_directions)
 
         # since we are constructing all hits, save them to a deque then
         # stack into (depth, len(rays)) at the end
-        result_triangle = deque()
-        result_ray_idx = deque()
-        result_locations = deque()
+        result_triangle = []
+        result_ray_idx = []
+        result_locations = []
 
         # the mask for which rays are still active
         current = np.ones(len(ray_origins), dtype=np.bool)
 
         if multiple_hits or return_locations:
-            # how much to offset ray to transport to the other side of it
-            offset_distance = self._geometry.scale * _ray_offset_factor
-            offset_distance = np.clip(offset_distance,
-                                      a_min=_ray_offset_floor,
-                                      a_max=1.0)
-            ray_offset = ray_directions * offset_distance
+            # how much to offset ray to transport to the other side of face
+            distance = np.clip(_ray_offset_factor * self._scale,
+                               _ray_offset_floor,
+                               np.inf)
+            ray_offsets = ray_directions * distance
 
             # grab the planes from triangles
-            plane_origins = self._geometry.triangles[:, 0, :]
-            plane_normals = self._geometry.face_normals
+            plane_origins = self.mesh.triangles[:, 0, :]
+            plane_normals = self.mesh.face_normals
 
         # use a for loop rather than a while to ensure this exits
-        # if a ray is offset from a triangle and then is reported hitting
-        # itself this could get stuck on that one triangle
+        # if a ray is offset from a triangle and then is reported
+        # hitting itself this could get stuck on that one triangle
         for query_depth in range(max_hits):
             # run the pyembree query
-            query = self._scene.run(ray_origins[current],
-                                    ray_directions[current])
+            # if you set output=1 it will calculate distance along
+            # ray, which is bizzarely slower than our calculation
+            query = self._scene.run(
+                ray_origins[current],
+                ray_directions[current])
 
             # basically we need to reduce the rays to the ones that hit
             # something
@@ -162,7 +229,7 @@ class RayMeshIntersector:
 
             if multiple_hits:
                 # move the ray origin to the other side of the triangle
-                ray_origins[current] = new_origins + ray_offset[current]
+                ray_origins[current] = new_origins + ray_offsets[current]
             else:
                 break
 
@@ -171,50 +238,109 @@ class RayMeshIntersector:
         index_ray = np.hstack(result_ray_idx)
 
         if return_locations:
-            return index_tri, index_ray, np.array(result_locations)
+            locations = (
+                np.zeros((0, 3), float) if len(result_locations) == 0
+                else np.array(result_locations))
+
+            return index_tri, index_ray, locations
         return index_tri, index_ray
 
+    @log_time
     def intersects_first(self,
                          ray_origins,
                          ray_directions):
-        '''
-        Find the index of the first triangle a ray hits. 
+        """
+        Find the index of the first triangle a ray hits.
 
 
         Parameters
         ----------
-        ray_origins:    (n,3) float, origins of rays
-        ray_directions: (n,3) float, direction (vector) of rays
+        ray_origins : (n, 3) float
+          Origins of rays
+        ray_directions : (n, 3) float
+          Direction (vector) of rays
 
         Returns
         ----------
-        triangle_index: (n,) int, index of triangle ray hit, or -1 if not hit
-        '''
+        triangle_index : (n,) int
+          Index of triangle ray hit, or -1 if not hit
+        """
 
-        ray_origins = np.asanyarray(deepcopy(ray_origins), dtype=np.float64)
-        ray_directions = np.asanyarray(ray_directions, dtype=np.float64)
+        ray_origins = np.asanyarray(deepcopy(ray_origins))
+        ray_directions = np.asanyarray(ray_directions)
 
-        triangle_index = self._scene.run(ray_origins, ray_directions)
+        triangle_index = self._scene.run(ray_origins,
+                                         ray_directions)
         return triangle_index
 
     def intersects_any(self,
                        ray_origins,
                        ray_directions):
-        '''
+        """
         Check if a list of rays hits the surface.
 
 
         Parameters
-        ----------
-        ray_origins:    (n,3) float, origins of rays
-        ray_directions: (n,3) float, direction (vector) of rays
+        -----------
+        ray_origins : (n, 3) float
+          Origins of rays
+        ray_directions : (n, 3) float
+          Direction (vector) of rays
 
         Returns
         ----------
-        hit:            (n,) bool, did each ray hit the surface
-        '''
+        hit : (n,) bool
+          Did each ray hit the surface
+        """
 
         first = self.intersects_first(ray_origins=ray_origins,
                                       ray_directions=ray_directions)
         hit = first != -1
         return hit
+
+    def contains_points(self, points):
+        """
+        Check if a mesh contains a list of points, using ray tests.
+
+        If the point is on the surface of the mesh, behavior is undefined.
+
+        Parameters
+        ---------
+        points: (n, 3) points in space
+
+        Returns
+        ---------
+        contains: (n,) bool
+                         Whether point is inside mesh or not
+        """
+        return contains_points(self, points)
+
+
+class _EmbreeWrap(object):
+    """
+    A light wrapper for PyEmbree scene objects which
+    allows queries to be scaled to help with precision
+    issues, as well as selecting the correct dtypes.
+    """
+
+    def __init__(self, vertices, faces, scale):
+        scaled = np.array(vertices,
+                          dtype=np.float64)
+        self.origin = scaled.min(axis=0)
+        self.scale = float(scale)
+        scaled = (scaled - self.origin) * self.scale
+
+        self.scene = rtcore_scene.EmbreeScene()
+        # assign the geometry to the scene
+        TriangleMesh(
+            scene=self.scene,
+            vertices=scaled.astype(_embree_dtype),
+            indices=faces.view(np.ndarray).astype(np.int32))
+
+    def run(self, origins, normals, **kwargs):
+        scaled = (np.array(origins,
+                           dtype=np.float64) - self.origin) * self.scale
+
+        return self.scene.run(scaled.astype(_embree_dtype),
+                              normals.astype(_embree_dtype),
+                              **kwargs)
